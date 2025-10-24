@@ -1,5 +1,6 @@
 from src.chemistry import substructure_search
 
+
 def test_substructure_search_basic():
     molecules = [
         "CCO",

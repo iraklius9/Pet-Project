@@ -1,4 +1,4 @@
-.PHONY: install test run up down logs
+.PHONY: install test run up down logs up-detached lint
 
 
 # for local development
@@ -26,3 +26,6 @@ logs:
 
 test:
 	PYTHONPATH=. DATABASE_URL=sqlite:///file::memory:?cache=shared CELERY_TASK_ALWAYS_EAGER=1 pytest -q
+
+lint:
+	flake8 src tests

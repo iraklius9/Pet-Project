@@ -20,9 +20,9 @@ if str(SRC) not in sys.path:
 # Ensure test-friendly env before importing app or db
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.gettempdir(), "chem_test.db"))
 
-from src.db import Base, engine  # import after setting env
-import src.main as main  # type: ignore
-from src.cache import get_cache as cache_get_cache  # type: ignore
+from src.db import Base, engine  # noqa: E402 - import after setting env
+import src.main as main  # noqa: E402  # type: ignore
+from src.cache import get_cache as cache_get_cache  # noqa: E402  # type: ignore
 
 
 class FakeCache:

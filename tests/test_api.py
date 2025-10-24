@@ -1,6 +1,7 @@
 from typing import Any
 from fastapi.testclient import TestClient
 
+
 def create(client: TestClient, identifier: str, smiles: str) -> dict[str, Any]:
     r = client.post("/molecules/", json={"identifier": identifier, "smiles": smiles})
     assert r.status_code == 201, r.text

@@ -1,6 +1,7 @@
 from rdkit import Chem
 from rdkit.Chem import DataStructs
 
+
 def validate_smiles(smiles: str):
     if not smiles or not isinstance(smiles, str):
         return False
