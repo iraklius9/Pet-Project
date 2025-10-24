@@ -1,0 +1,30 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install flake8
+      - name: Run tests
+        env:
+          DATABASE_URL: sqlite:///file::memory:?cache=shared
+          CELERY_TASK_ALWAYS_EAGER: '1'
+          PYTHONPATH: .
+        run: pytest -q
+      - name: Lint
+        run: flake8 src/
+      - name: Build Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker build -t chemistryapp:ci .
