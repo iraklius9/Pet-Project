@@ -5,10 +5,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-REDIS_URL = os.getenv("REDIS_URL")
-RABBITMQ_URL = os.getenv("RABBITMQ_URL")
-CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL"))
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/dbname")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL", "360"))
 
 
 def setup_logging():
