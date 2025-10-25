@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 
 from .chemistry import validate_smiles, substructure_search
 from .db import Molecule, get_db, db_session_scope
@@ -26,6 +27,45 @@ from .celery_app import celery_app
 
 router = APIRouter()
 
+
+# --------- helpers ---------
+
+def _to_uuid(value: object) -> UUID:
+    try:
+        return UUID(str(value))
+    except Exception:
+        return uuid4()
+
+
+def _to_out(m: Molecule) -> MoleculeOut:
+    return MoleculeOut(id=_to_uuid(m.id), identifier=m.identifier, smiles=m.smiles)
+
+
+def _cache_get_json(cache: redis.Redis, key: str):
+    cached = cache.get(key)
+    if not cached:
+        return None
+    try:
+        return json.loads(cached)
+    except Exception:
+        return None
+
+
+def _cache_set_json(cache: redis.Redis, key: str, value) -> None:
+    try:
+        cache.setex(key, CACHE_TTL_SECONDS, json.dumps(value))
+    except Exception:
+        # Cache failures must not break request handling
+        pass
+
+
+def _get_smiles_list(db: Session, limit: Optional[int] = None) -> list[str]:
+    stmt = select(Molecule.smiles)
+    if limit:
+        stmt = stmt.limit(limit)
+    return [row[0] for row in db.execute(stmt).all()]
+
+
 # Molecules endpoints
 molecules = APIRouter(prefix="/molecules", tags=["molecules"])
 
@@ -39,10 +79,13 @@ def create_molecule(payload: MoleculeCreate, db: Session = Depends(get_db)) -> M
     try:
         db.flush()
         db.refresh(mol)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Identifier already exists")
     except Exception:
         db.rollback()
         raise HTTPException(status_code=409, detail="Identifier already exists")
-    return MoleculeOut(id=UUID(str(mol.id)), identifier=mol.identifier, smiles=mol.smiles)
+    return _to_out(mol)
 
 
 def _get_molecule_by_any_id(db: Session, id_or_identifier: str) -> Molecule:
@@ -63,11 +106,7 @@ def _get_molecule_by_any_id(db: Session, id_or_identifier: str) -> Molecule:
 @molecules.get("/{id}", response_model=MoleculeOut)
 def get_molecule(id: str, db: Session = Depends(get_db)) -> MoleculeOut:
     mol = _get_molecule_by_any_id(db, id)
-    try:
-        uid = UUID(str(mol.id))
-    except Exception:
-        uid = uuid4()
-    return MoleculeOut(id=uid, identifier=mol.identifier, smiles=mol.smiles)
+    return _to_out(mol)
 
 
 @molecules.put("/{id}", response_model=MoleculeOut)
@@ -82,14 +121,13 @@ def update_molecule(id: str, payload: MoleculeUpdate, db: Session = Depends(get_
     try:
         db.flush()
         db.refresh(mol)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Identifier already exists")
     except Exception:
         db.rollback()
         raise HTTPException(status_code=409, detail="Identifier already exists")
-    try:
-        uid = UUID(str(mol.id))
-    except Exception:
-        uid = uuid4()
-    return MoleculeOut(id=uid, identifier=mol.identifier, smiles=mol.smiles)
+    return _to_out(mol)
 
 
 @molecules.delete("/{id}", status_code=204)
@@ -106,23 +144,11 @@ def list_molecules(limit: int = Query(100, ge=1, le=10_000), stream: bool = Quer
     stmt = select(Molecule).limit(limit)
     if not stream:
         rows = db.execute(stmt).scalars().all()
-        out = []
-        for m in rows:
-            try:
-                uid = UUID(str(m.id))
-            except Exception:
-                uid = uuid4()
-            out.append(MoleculeOut(id=uid, identifier=m.identifier, smiles=m.smiles).model_dump())
-        return out
+        return [_to_out(m).model_dump() for m in rows]
 
     def _gen() -> Iterator[bytes]:
         for m in db.execute(stmt).scalars():
-            try:
-                uid = UUID(str(m.id))
-            except Exception:
-                uid = uuid4()
-            yield (json.dumps(
-                MoleculeOut(id=uid, identifier=m.identifier, smiles=m.smiles).model_dump()).encode() + b"\n")
+            yield (json.dumps(_to_out(m).model_dump()).encode() + b"\n")
 
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
@@ -150,6 +176,9 @@ async def upload_molecules(file: UploadFile = File(...), db: Session = Depends(g
             db.add(Molecule(identifier=identifier, smiles=smiles))
             db.flush()
             created += 1
+        except IntegrityError:
+            db.rollback()
+            continue
         except Exception:
             db.rollback()
             continue
@@ -168,18 +197,12 @@ def substructure_search_endpoint(
         cache: redis.Redis = Depends(get_cache),
 ) -> list[str]:
     key = f"subsearch:{substructure}|limit={limit}"
-    cached = cache.get(key)
-    if cached:
-        try:
-            return json.loads(cached)
-        except Exception:
-            pass
-    stmt = select(Molecule.smiles)
-    if limit:
-        stmt = stmt.limit(limit)
-    smiles_list = [row[0] for row in db.execute(stmt).all()]
+    cached = _cache_get_json(cache, key)
+    if cached is not None:
+        return cached
+    smiles_list = _get_smiles_list(db, limit)
     hits = substructure_search(smiles_list, substructure)
-    cache.setex(key, CACHE_TTL_SECONDS, json.dumps(hits))
+    _cache_set_json(cache, key, hits)
     return hits
 
 
@@ -190,25 +213,18 @@ def substructure_search_post(
         cache: redis.Redis = Depends(get_cache),
 ) -> SubstructureSearchResponse:
     key = f"subsearch:{payload.substructure}|limit={payload.limit}"
-    cached = cache.get(key)
-    if cached:
-        try:
-            hits = json.loads(cached)
-            return SubstructureSearchResponse(
-                substructure=payload.substructure,
-                limit=payload.limit,
-                count=len(hits),
-                hits=hits,
-                cached=True,
-            )
-        except Exception:
-            pass
-    stmt = select(Molecule.smiles)
-    if payload.limit:
-        stmt = stmt.limit(payload.limit)
-    smiles_list = [row[0] for row in db.execute(stmt).all()]
+    cached_hits = _cache_get_json(cache, key)
+    if cached_hits is not None:
+        return SubstructureSearchResponse(
+            substructure=payload.substructure,
+            limit=payload.limit,
+            count=len(cached_hits),
+            hits=cached_hits,
+            cached=True,
+        )
+    smiles_list = _get_smiles_list(db, payload.limit)
     hits = substructure_search(smiles_list, payload.substructure)
-    cache.setex(key, CACHE_TTL_SECONDS, json.dumps(hits))
+    _cache_set_json(cache, key, hits)
     return SubstructureSearchResponse(
         substructure=payload.substructure,
         limit=payload.limit,
@@ -226,10 +242,7 @@ tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
 @celery_app.task(name="tasks.substructure_search_db")
 def substructure_search_db(substructure: str, limit: Optional[int] = None) -> list[str]:
     with db_session_scope() as db:
-        stmt = select(Molecule.smiles)
-        if limit:
-            stmt = stmt.limit(limit)
-        smiles_list = [row[0] for row in db.execute(stmt).all()]
+        smiles_list = _get_smiles_list(db, limit)
     return substructure_search(smiles_list, substructure)
 
 
