@@ -25,7 +25,8 @@ logs:
 # tests
 
 test:
-	PYTHONPATH=. DATABASE_URL=sqlite:///file::memory:?cache=shared CELERY_TASK_ALWAYS_EAGER=1 pytest -q
+	PYTHONPATH=. DATABASE_URL=sqlite:///file::memory:?cache=shared CELERY_TASK_ALWAYS_EAGER=1 pytest -q -rA
+
 
 lint:
 	flake8 src tests
