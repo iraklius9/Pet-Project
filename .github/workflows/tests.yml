@@ -24,7 +24,16 @@ jobs:
         run: pytest -q
       - name: Lint
         run: flake8 src/
-      - name: Build Docker image
+      - name: Log in to Docker Hub
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push Docker image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker build -t chemistryapp:ci .
+          IMAGE_TAG=latest
+          FULL_IMAGE_NAME=${{ secrets.DOCKERHUB_USERNAME }}/chemistryapp:${IMAGE_TAG}
+          docker build -t $FULL_IMAGE_NAME .
+          docker push $FULL_IMAGE_NAME
