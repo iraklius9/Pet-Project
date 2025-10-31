@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+numpy<2
+rdkit-pypi; python_version < "3.12"
+sqlalchemy
+asyncpg
+aiosqlite
+psycopg2-binary
+redis>=4.2
+celery
+pytest
+httpx
+python-multipart
+python-dotenv
+flake8
+alembic
