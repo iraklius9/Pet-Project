@@ -62,3 +62,25 @@ def test_duplicate_smiles_prevention(client: TestClient):
     r2 = client.post("/molecules/", json={"smiles": "CCO"})
     assert r2.status_code == 409
     assert "already exists" in r2.json()["detail"]
+
+
+def test_bulk_upload_skips_duplicates(client: TestClient):
+    create(client, "CCO")
+    create(client, "c1ccccc1")
+
+    payload = "CCO\nc1ccccc1\nCC(=O)Oc1ccccc1C(=O)O\nCCO\ninvalid$$$\n"
+    files = {
+        "file": ("mols.txt", payload, "text/plain"),
+    }
+    r = client.post("/molecules/upload/", files=files)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert data["total"] == 5
+    assert data["invalid"] == 1
+    assert data["skipped_existing"] == 2
+    assert data["created"] == 1
+
+    r_list = client.get("/molecules/?limit=100")
+    assert r_list.status_code == 200
+    smiles_list = {m["smiles"] for m in r_list.json()}
+    assert "CC(=O)Oc1ccccc1C(=O)O" in smiles_list

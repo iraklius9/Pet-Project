@@ -85,5 +85,4 @@ uvicorn src.main:app --reload
 - GET /substructure-search/?substructure=SMARTS[&limit=N]
 - POST /tasks/substructure
 - GET /tasks/{task_id}
-- POST /upload/
-
+- POST /molecules/upload/

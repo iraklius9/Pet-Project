@@ -137,28 +137,75 @@ async def list_molecules(
 @molecules.post(
     "/upload/",
     summary="Bulk upload molecules",
-    description="Upload multiple molecules from a text file. One SMILES per line. Invalid/duplicate entries are skipped."
+    description="Upload multiple molecules from a text file. One SMILES per line or separated by whitespace/commas."
+                " Invalid/duplicate entries are skipped. Returns counters."
 )
 async def upload_molecules(
-        file: UploadFile = File(..., description="Text file with SMILES (one per line)"),
+        file: UploadFile = File(..., description="Text file with SMILES (one per line or whitespace-separated)"),
         db: AsyncSession = Depends(get_db)
 ):
-    content = (await file.read()).decode()
+    import re
+
+    content_bytes = await file.read()
+    try:
+        content = content_bytes.decode()
+    except Exception:
+        content = content_bytes.decode(errors="ignore")
+
+    tokens = [tok.strip() for tok in re.split(r"[\s,;]+", content.strip()) if tok.strip()]
+    if not tokens:
+        return {"created": 0, "skipped_existing": 0, "invalid": 0, "total": 0}
+
+    if tokens and tokens[0].lower() == "smiles":
+        tokens = tokens[1:]
+
+    total = len(tokens)
+
+    seen = set()
+    deduped = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+
+    valid_smiles = []
+    invalid_count = 0
+    for s in deduped:
+        if validate_smiles(s):
+            valid_smiles.append(s)
+        else:
+            invalid_count += 1
+
+    if not valid_smiles:
+        return {"created": 0, "skipped_existing": 0, "invalid": invalid_count, "total": total}
+
+    existing = set(await _get_smiles_list(db))
+    to_insert = [s for s in valid_smiles if s not in existing]
+    skipped_existing = len(valid_smiles) - len(to_insert)
+
     created = 0
-    for line in content.splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith("smiles"):
-            continue
-        smiles = line
-        if not validate_smiles(smiles):
-            continue
+    if to_insert:
         try:
-            db.add(Molecule(smiles=smiles))
+            db.add_all([Molecule(smiles=s) for s in to_insert])
             await db.flush()
-            created += 1
-        except Exception:
+            created = len(to_insert)
+        except IntegrityError:
             await db.rollback()
-    return {"created": created}
+            for s in to_insert:
+                try:
+                    db.add(Molecule(smiles=s))
+                    await db.flush()
+                    created += 1
+                except IntegrityError:
+                    await db.rollback()
+                    continue
+
+    return {
+        "created": created,
+        "skipped_existing": skipped_existing,
+        "invalid": invalid_count,
+        "total": total,
+    }
 
 
 search_router = APIRouter(prefix="", tags=["search"])
