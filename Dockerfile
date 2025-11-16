@@ -15,6 +15,12 @@ COPY alembic/ ./alembic/
 COPY entrypoint.sh ./
 RUN chmod +x /app/entrypoint.sh
 
+COPY healthcheck.sh ./
+RUN chmod +x /app/healthcheck.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD /app/healthcheck.sh || exit 1
+
 EXPOSE 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]

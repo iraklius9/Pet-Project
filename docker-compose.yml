@@ -114,9 +114,9 @@ services:
       - ./nginx:/etc/nginx/conf.d
     depends_on:
       web1:
-        condition: service_started
+        condition: service_healthy
       web2:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

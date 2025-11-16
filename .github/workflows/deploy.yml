@@ -1,0 +1,80 @@
+name: CI and Deploy
+
+on:
+  push:
+    branches: [ develop, master ]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        env:
+          DATABASE_URL: sqlite+aiosqlite:///file::memory:?cache=shared
+          CELERY_TASK_ALWAYS_EAGER: '1'
+        run: |
+          pytest -q -rA
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Upload repo to EC2 (scp)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "."
+          target: "~/app"
+          rm: false
+          strip_components: 0
+          overwrite: true
+          debug: false
+          exclude: ".git, .github, **/__pycache__/**, **/.pytest_cache/**, **/.mypy_cache/**"
+
+      - name: Deploy on EC2 (docker compose up)
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ~/app
+            if [ ! -f .env ]; then
+              echo ".env not found on instance; copying repo .env as baseline" >&2 || true
+              cp .env .env.server || true
+            fi
+            docker compose version || sudo apt-get update && sudo apt-get install -y docker.io docker-compose-plugin || true
+            sudo systemctl enable docker || true
+            sudo systemctl start docker || true
+            docker compose pull || true
+            docker compose up -d --build
+            docker ps
+
