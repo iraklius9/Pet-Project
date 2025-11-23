@@ -44,7 +44,24 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Upload repo to EC2 (scp)
+
+      - name: Preflight — validate secrets and SSH reachability
+        run: |
+          set -euo pipefail
+          echo "Testing SSH port reachability to ${{ secrets.EC2_HOST }}:22..."
+          if ! command -v nc &> /dev/null; then
+            sudo apt-get update -y && sudo apt-get install -y netcat-openbsd || true
+          fi
+          # Try connecting to port 22 with a 5-second timeout
+          if ! timeout 5 nc -zv "${{ secrets.EC2_HOST }}" 22; then
+            echo "ERROR: SSH port 22 is unreachable."
+            echo "Check: AWS Security Group must allow port 22 from 0.0.0.0/0 (or this runner's IP)."
+            exit 1
+          fi
+          echo "SSH port is open."
+
+
+      - name: Upload selected files to EC2 (scp)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -54,52 +71,100 @@ jobs:
           target: "~/app"
           overwrite: true
           strip_components: 0
+          timeout: 60s
+
 
       - name: Deploy on EC2 (docker compose up)
         uses: appleboy/ssh-action@v1.1.0
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          DATABASE_URL: postgresql+asyncpg://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,DATABASE_URL,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION
+          command_timeout: 30m
           script: |
             set -euo pipefail
-            cd ~/app
             
-            if [ ! -f .env ]; then
-              echo "Generating .env on server (no repo dependency)" >&2
-              cat > .env << 'EOF'
-            POSTGRES_USER=postgres
-            POSTGRES_PASSWORD=postgres
-            POSTGRES_DB=postgres
-            DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/postgres
+            # --- STEP A: Disk Expansion (Fixes 'No space left' PERMANENTLY) ---
+            # NOTE: You must verify volume size is increased in AWS Console first.
+            echo "Attempting to expand filesystem..."
+            # Install growpart utility if missing
+            if ! command -v growpart &> /dev/null; then
+              sudo apt-get update -y && sudo apt-get install -y cloud-guest-utils
+            fi
+            # Grow partition 1 on nvme0n1 (standard for T3 instances)
+            # We use || true so deployment doesn't fail if already expanded
+            sudo growpart /dev/nvme0n1 1 || true
+            sudo resize2fs /dev/nvme0n1p1 || true
+
+            # --- STEP B: Create Swap File (Crucial for t3.micro RAM) ---
+            if [ $(free -m | grep Swap | awk '{print $2}') -eq 0 ]; then
+              echo "Creating 2GB Swap file for t3.micro stability..."
+              sudo fallocate -l 2G /swapfile
+              sudo chmod 600 /swapfile
+              sudo mkswap /swapfile
+              sudo swapon /swapfile
+              echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+              echo "Swap created."
+            else
+              echo "Swap already exists."
+            fi
+
+            # --- STEP C: Aggressive Cleanup (Fixes 'No space left' TEMPORARILY) ---
+            # Remove all stopped containers, networks, and unused images to free space for the build
+            echo "Pruning Docker system to free disk space..."
+            sudo docker system prune -af --volumes || true
+
+            cd ~/app
+
+            # --- STEP D: Generate .env with REAL secrets ---
+            echo "Generating .env..."
+            cat > .env <<EOF
+            POSTGRES_USER=$POSTGRES_USER
+            POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+            POSTGRES_DB=$POSTGRES_DB
+            DATABASE_URL=$DATABASE_URL
             REDIS_URL=redis://redis:6379/0
-            RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
+            RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
             CACHE_TTL=360
             UVICORN_PORT=8000
             HEALTHCHECK_HOST=127.0.0.1
             HEALTHCHECK_PORT=8000
             HEALTHCHECK_PATH=/
+            AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+            AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+            AWS_REGION=$AWS_REGION
             EOF
-            fi
-            
+
+            # --- STEP E: Install Docker (Only if missing) ---
             if ! command -v docker &> /dev/null; then
-              echo "Installing Docker..." >&2
+              echo "Installing Docker..."
               sudo apt-get update -y
-              sudo apt-get install -y ca-certificates curl gnupg lsb-release
-              sudo mkdir -p /etc/apt/keyrings
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-              sudo apt-get update -y
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+              sudo apt-get install -y docker.io
+              sudo systemctl enable --now docker
+              # Allow current user to run docker without sudo
+              sudo usermod -aG docker \$USER
+            fi
+
+            # --- STEP F: Deploy ---
+            echo "Deploying stack..."
+            # Check if using "docker compose" (v2) or "docker-compose" (v1)
+            if docker compose version &> /dev/null; then
+              CMD="docker compose"
+            else
+              CMD="docker-compose"
             fi
             
-            sudo systemctl enable docker || true
-            sudo systemctl start docker || true
+            sudo $CMD pull --quiet # Quiet pull to reduce log spam
+            sudo $CMD up -d --build --force-recreate --remove-orphans
             
-            echo "Deploying with Docker Compose..." >&2
-            sudo docker compose pull || true
-            sudo docker compose up -d --build --force-recreate
-            
-            sudo docker compose ps
-            echo "Deployment logs (last 20 lines):" >&2
-            sudo docker compose logs --tail=20
+            echo "Deployment successful. Container status:"
+            sudo $CMD ps

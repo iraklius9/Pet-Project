@@ -7,5 +7,4 @@ PATH_PART="${HEALTHCHECK_PATH:-/}"
 
 URL="http://${HOST}:${PORT}${PATH_PART}"
 
-curl -fsS --max-time 2 "$URL" > /dev/null
-
+curl -fsS --max-time 10 "$URL" > /dev/null

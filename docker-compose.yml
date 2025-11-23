@@ -9,10 +9,10 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "postgres"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 30s
     restart: unless-stopped
 
   redis:
@@ -35,9 +35,10 @@ services:
       RABBITMQ_LOG_LEVEL: warning
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
-      interval: 10s
-      timeout: 5s
+      interval: 20s
+      timeout: 10s
       retries: 5
+      start_period: 30s
     restart: unless-stopped
 
   web1:
@@ -60,6 +61,12 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "./healthcheck.sh"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   web2:
@@ -82,6 +89,12 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "./healthcheck.sh"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
 
   celery_worker:
